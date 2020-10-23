@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	strftime "github.com/lestrrat-go/strftime"
 )
 
 const (
@@ -107,6 +109,12 @@ type Logger struct {
 	// using gzip. The default is not to perform compression.
 	Compress bool `json:"compress" yaml:"compress"`
 
+	// Split file name
+	PatternFileName string `json:"patternfilename" yaml:"patternfilename"`
+
+	preName     string
+	currentName string
+
 	size int64
 	file *os.File
 	mu   sync.Mutex
@@ -127,6 +135,25 @@ var (
 	// to disk.
 	megabyte = 1024 * 1024
 )
+
+func (l *Logger) genFilename() string {
+	pattern, err := strftime.New(l.PatternFileName)
+	if err != nil {
+		fmt.Println(err)
+		return ""
+	}
+	now := time.Now()
+	rotationTime := 24 * time.Hour
+	var base time.Time
+	if now.Location() != time.UTC {
+		base = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), time.UTC)
+		base = base.Truncate(time.Duration(rotationTime))
+		base = time.Date(base.Year(), base.Month(), base.Day(), base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
+	} else {
+		base = now.Truncate(time.Duration(rotationTime))
+	}
+	return pattern.FormatString(base)
+}
 
 // Write implements io.Writer.  If a write would cause the log file to be larger
 // than MaxSize, the file is closed, renamed to include a timestamp of the
@@ -149,8 +176,17 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 		}
 	}
 
-	if l.size+writeLen > l.max() {
-		if err := l.rotate(); err != nil {
+	if l.PatternFileName != "" {
+		l.currentName = l.genFilename()
+		preName := l.preName
+		l.preName = l.currentName
+		if preName != "" && l.currentName != preName {
+			if err := l.rotate(preName); err != nil {
+				return 0, err
+			}
+		}
+	} else if l.size+writeLen > l.max() {
+		if err := l.rotate(""); err != nil {
 			return 0, err
 		}
 	}
@@ -186,17 +222,17 @@ func (l *Logger) close() error {
 func (l *Logger) Rotate() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.rotate()
+	return l.rotate("")
 }
 
 // rotate closes the current file, moves it aside with a timestamp in the name,
 // (if it exists), opens a new file with the original filename, and then runs
 // post-rotation processing and removal.
-func (l *Logger) rotate() error {
+func (l *Logger) rotate(bakfilename string) error {
 	if err := l.close(); err != nil {
 		return err
 	}
-	if err := l.openNew(); err != nil {
+	if err := l.openNew(bakfilename); err != nil {
 		return err
 	}
 	l.mill()
@@ -205,7 +241,7 @@ func (l *Logger) rotate() error {
 
 // openNew opens a new log file for writing, moving any old log file out of the
 // way.  This methods assumes the file has already been closed.
-func (l *Logger) openNew() error {
+func (l *Logger) openNew(bakfilename string) error {
 	err := os.MkdirAll(l.dir(), 0755)
 	if err != nil {
 		return fmt.Errorf("can't make directories for new logfile: %s", err)
@@ -218,7 +254,10 @@ func (l *Logger) openNew() error {
 		// Copy the mode off the old logfile.
 		mode = info.Mode()
 		// move the existing file
-		newname := backupName(name, l.LocalTime)
+		newname := bakfilename
+		if newname == "" {
+			newname = backupName(name, l.LocalTime)
+		}
 		if err := os.Rename(name, newname); err != nil {
 			return fmt.Errorf("can't rename log file: %s", err)
 		}
@@ -265,23 +304,32 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 	l.mill()
 
 	filename := l.filename()
+	if l.PatternFileName != "" {
+		l.currentName = l.genFilename()
+	}
 	info, err := osStat(filename)
 	if os.IsNotExist(err) {
-		return l.openNew()
+		return l.openNew(l.currentName)
 	}
 	if err != nil {
 		return fmt.Errorf("error getting log file info: %s", err)
 	}
 
-	if info.Size()+int64(writeLen) >= l.max() {
-		return l.rotate()
+	if l.PatternFileName != "" {
+		preName := l.preName
+		l.preName = l.currentName
+		if preName != "" && l.currentName != preName {
+			return l.rotate(preName)
+		}
+	} else if info.Size()+int64(writeLen) >= l.max() {
+		return l.rotate("")
 	}
 
 	file, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		// if we fail to open the old log file for some reason, just ignore
 		// it and open a new log file.
-		return l.openNew()
+		return l.openNew(l.preName)
 	}
 	l.file = file
 	l.size = info.Size()
@@ -446,7 +494,7 @@ func (l *Logger) max() int64 {
 	if l.MaxSize == 0 {
 		return int64(defaultMaxSize * megabyte)
 	}
-	return int64(l.MaxSize) * int64(megabyte)
+	return int64(l.MaxSize)
 }
 
 // dir returns the directory for the current filename.

@@ -112,8 +112,11 @@ type Logger struct {
 	// Split file name
 	PatternFileName string `json:"patternfilename" yaml:"patternfilename"`
 
-	preName     string
-	currentName string
+	strftimePattern     *strftime.Strftime
+	oldTimeParsePattern string
+	timeParsePattern    string
+	preName             string
+	currentName         string
 
 	size int64
 	file *os.File
@@ -137,22 +140,18 @@ var (
 )
 
 func (l *Logger) genFilename() string {
-	pattern, err := strftime.New(l.PatternFileName)
-	if err != nil {
-		fmt.Println(err)
-		return ""
+	if l.strftimePattern == nil {
+		pattern, err := strftime.New(l.PatternFileName)
+		if err != nil {
+			fmt.Println(err)
+			return ""
+		}
+		l.strftimePattern = pattern
+		replacer := strings.NewReplacer("%Y", "2006", "%m", "01", "%d", "02", "%H", "15", "%M", "04", "%S", "05")
+		l.oldTimeParsePattern = replacer.Replace(l.PatternFileName)
 	}
 	now := time.Now()
-	rotationTime := 24 * time.Hour
-	var base time.Time
-	if now.Location() != time.UTC {
-		base = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), time.UTC)
-		base = base.Truncate(time.Duration(rotationTime))
-		base = time.Date(base.Year(), base.Month(), base.Day(), base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
-	} else {
-		base = now.Truncate(time.Duration(rotationTime))
-	}
-	return pattern.FormatString(base)
+	return l.strftimePattern.FormatString(now)
 }
 
 // Write implements io.Writer.  If a write would cause the log file to be larger
@@ -164,7 +163,7 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 	defer l.mu.Unlock()
 
 	writeLen := int64(len(p))
-	if writeLen > l.max() {
+	if l.PatternFileName == "" && writeLen > l.max() {
 		return 0, fmt.Errorf(
 			"write length %d exceeds maximum file size %d", writeLen, l.max(),
 		)
@@ -177,8 +176,8 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 	}
 
 	if l.PatternFileName != "" {
-		l.currentName = l.genFilename()
 		preName := l.preName
+		l.currentName = l.genFilename()
 		l.preName = l.currentName
 		if preName != "" && l.currentName != preName {
 			if err := l.rotate(preName); err != nil {
@@ -387,7 +386,7 @@ func (l *Logger) millRunOnce() error {
 
 		var remaining []logInfo
 		for _, f := range files {
-			if f.timestamp.Before(cutoff) {
+			if f.ModTime().Before(cutoff) {
 				remove = append(remove, f)
 			} else {
 				remaining = append(remaining, f)
@@ -466,6 +465,14 @@ func (l *Logger) oldLogFiles() ([]logInfo, error) {
 			logFiles = append(logFiles, logInfo{t, f})
 			continue
 		}
+		if t, err := l.timePatternFromName(f.Name(), prefix, ext); err == nil {
+			logFiles = append(logFiles, logInfo{t, f})
+			continue
+		}
+		if t, err := l.timePatternFromName(f.Name(), prefix, ext+compressSuffix); err == nil {
+			logFiles = append(logFiles, logInfo{t, f})
+			continue
+		}
 		// error parsing means that the suffix at the end was not generated
 		// by lumberjack, and therefore it's not a backup file.
 	}
@@ -489,12 +496,33 @@ func (l *Logger) timeFromName(filename, prefix, ext string) (time.Time, error) {
 	return time.Parse(backupTimeFormat, ts)
 }
 
+func (l *Logger) timePatternFromName(filename, prefix, ext string) (time.Time, error) {
+	if !strings.HasPrefix(filename, prefix) {
+		return time.Time{}, errors.New("mismatched prefix")
+	}
+	if !strings.HasSuffix(filename, ext) {
+		return time.Time{}, errors.New("mismatched extension")
+	}
+	if l.timeParsePattern == "" {
+		index := strings.Index(l.oldTimeParsePattern, prefix)
+		start := index + len(prefix)
+		extStr := ext
+		if strings.Index(extStr, compressSuffix) != -1 {
+			extStr = extStr[0 : len(extStr)-len(compressSuffix)]
+		}
+		end := len(l.oldTimeParsePattern) - len(extStr)
+		l.timeParsePattern = l.oldTimeParsePattern[start:end]
+	}
+	ts := filename[len(prefix) : len(filename)-len(ext)]
+	return time.Parse(l.timeParsePattern, ts)
+}
+
 // max returns the maximum size in bytes of log files before rolling.
 func (l *Logger) max() int64 {
 	if l.MaxSize == 0 {
 		return int64(defaultMaxSize * megabyte)
 	}
-	return int64(l.MaxSize)
+	return int64(l.MaxSize) * int64(megabyte)
 }
 
 // dir returns the directory for the current filename.

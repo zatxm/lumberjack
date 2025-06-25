@@ -1,4 +1,4 @@
-module github.com/zatxm/lumberjack/v1
+module github.com/zatxm/lumberjack
 
 go 1.24.3
 

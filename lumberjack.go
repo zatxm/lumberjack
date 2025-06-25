@@ -1,32 +1,9 @@
-// Package lumberjack provides a rolling logger.
-//
-// Note that this is v2.0 of lumberjack, and should be imported using gopkg.in
-// thusly:
-//
-//   import "gopkg.in/natefinch/lumberjack.v2"
-//
-// The package name remains simply lumberjack, and the code resides at
-// https://github.com/natefinch/lumberjack under the v2.0 branch.
-//
-// Lumberjack is intended to be one part of a logging infrastructure.
-// It is not an all-in-one solution, but instead is a pluggable
-// component at the bottom of the logging stack that simply controls the files
-// to which logs are written.
-//
-// Lumberjack plays well with any logging package that can write to an
-// io.Writer, including the standard library's log package.
-//
-// Lumberjack assumes that only one process is writing to the output files.
-// Using the same lumberjack configuration from multiple processes on the same
-// machine will result in improper behavior.
 package lumberjack
 
 import (
 	"compress/gzip"
-	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,38 +23,6 @@ const (
 // ensure we always implement io.WriteCloser
 var _ io.WriteCloser = (*Logger)(nil)
 
-// Logger is an io.WriteCloser that writes to the specified filename.
-//
-// Logger opens or creates the logfile on first Write.  If the file exists and
-// is less than MaxSize megabytes, lumberjack will open and append to that file.
-// If the file exists and its size is >= MaxSize megabytes, the file is renamed
-// by putting the current time in a timestamp in the name immediately before the
-// file's extension (or the end of the filename if there's no extension). A new
-// log file is then created using original filename.
-//
-// Whenever a write would cause the current log file exceed MaxSize megabytes,
-// the current file is closed, renamed, and a new log file created with the
-// original name. Thus, the filename you give Logger is always the "current" log
-// file.
-//
-// Backups use the log file name given to Logger, in the form
-// `name-timestamp.ext` where name is the filename without the extension,
-// timestamp is the time at which the log was rotated formatted with the
-// time.Time format of `2006-01-02T15-04-05.000` and the extension is the
-// original extension.  For example, if your Logger.Filename is
-// `/var/log/foo/server.log`, a backup created at 6:30pm on Nov 11 2016 would
-// use the filename `/var/log/foo/server-2016-11-04T18-30-00.000.log`
-//
-// Cleaning Up Old Log Files
-//
-// Whenever a new logfile gets created, old log files may be deleted.  The most
-// recent files according to the encoded timestamp will be retained, up to a
-// number equal to MaxBackups (or all of them if MaxBackups is 0).  Any files
-// with an encoded timestamp older than MaxAge days are deleted, regardless of
-// MaxBackups.  Note that the time encoded in the timestamp is the rotation
-// time, which may differ from the last time that file was written to.
-//
-// If MaxBackups and MaxAge are both 0, no old log files will be deleted.
 type Logger struct {
 	// Filename is the file to write logs to.  Backup log files will be retained
 	// in the same directory.  It uses <processname>-lumberjack.log in
@@ -143,15 +88,13 @@ func (l *Logger) genFilename() string {
 	if l.strftimePattern == nil {
 		pattern, err := strftime.New(l.PatternFileName)
 		if err != nil {
-			fmt.Println(err)
 			return ""
 		}
 		l.strftimePattern = pattern
 		replacer := strings.NewReplacer("%Y", "2006", "%m", "01", "%d", "02", "%H", "15", "%M", "04", "%S", "05")
 		l.oldTimeParsePattern = replacer.Replace(l.PatternFileName)
 	}
-	now := time.Now()
-	return l.strftimePattern.FormatString(now)
+	return l.strftimePattern.FormatString(time.Now())
 }
 
 // Write implements io.Writer.  If a write would cause the log file to be larger
@@ -363,13 +306,11 @@ func (l *Logger) millRunOnce() error {
 	if l.MaxBackups > 0 && l.MaxBackups < len(files) {
 		preserved := make(map[string]bool)
 		var remaining []logInfo
-		for _, f := range files {
+		for i := range files {
+			f := files[i]
 			// Only count the uncompressed log file or the
 			// compressed log file, not both.
-			fn := f.Name()
-			if strings.HasSuffix(fn, compressSuffix) {
-				fn = fn[:len(fn)-len(compressSuffix)]
-			}
+			fn := strings.TrimSuffix(f.Name(), compressSuffix)
 			preserved[fn] = true
 
 			if len(preserved) > l.MaxBackups {
@@ -385,7 +326,8 @@ func (l *Logger) millRunOnce() error {
 		cutoff := currentTime().Add(-1 * diff)
 
 		var remaining []logInfo
-		for _, f := range files {
+		for i := range files {
+			f := files[i]
 			if f.ModTime().Before(cutoff) {
 				remove = append(remove, f)
 			} else {
@@ -396,20 +338,24 @@ func (l *Logger) millRunOnce() error {
 	}
 
 	if l.Compress {
-		for _, f := range files {
+		for i := range files {
+			f := files[i]
 			if !strings.HasSuffix(f.Name(), compressSuffix) {
 				compress = append(compress, f)
 			}
 		}
 	}
 
-	for _, f := range remove {
+	for i := range remove {
+		f := remove[i]
 		errRemove := os.Remove(filepath.Join(l.dir(), f.Name()))
 		if err == nil && errRemove != nil {
 			err = errRemove
 		}
 	}
-	for _, f := range compress {
+
+	for i := range compress {
+		f := compress[i]
 		fn := filepath.Join(l.dir(), f.Name())
 		errCompress := compressLogFile(fn, fn+compressSuffix)
 		if err == nil && errCompress != nil {
@@ -445,7 +391,7 @@ func (l *Logger) mill() {
 // oldLogFiles returns the list of backup log files stored in the same
 // directory as the current log file, sorted by ModTime
 func (l *Logger) oldLogFiles() ([]logInfo, error) {
-	files, err := ioutil.ReadDir(l.dir())
+	files, err := os.ReadDir(l.dir())
 	if err != nil {
 		return nil, fmt.Errorf("can't read log file directory: %s", err)
 	}
@@ -453,7 +399,11 @@ func (l *Logger) oldLogFiles() ([]logInfo, error) {
 
 	prefix, ext := l.prefixAndExt()
 
-	for _, f := range files {
+	for i := range files {
+		f, err := files[i].Info()
+		if err != nil {
+			continue
+		}
 		if f.IsDir() {
 			continue
 		}
@@ -487,10 +437,10 @@ func (l *Logger) oldLogFiles() ([]logInfo, error) {
 // confusing time.parse.
 func (l *Logger) timeFromName(filename, prefix, ext string) (time.Time, error) {
 	if !strings.HasPrefix(filename, prefix) {
-		return time.Time{}, errors.New("mismatched prefix")
+		return time.Time{}, fmt.Errorf("mismatched prefix")
 	}
 	if !strings.HasSuffix(filename, ext) {
-		return time.Time{}, errors.New("mismatched extension")
+		return time.Time{}, fmt.Errorf("mismatched extension")
 	}
 	ts := filename[len(prefix) : len(filename)-len(ext)]
 	return time.Parse(backupTimeFormat, ts)
@@ -498,16 +448,16 @@ func (l *Logger) timeFromName(filename, prefix, ext string) (time.Time, error) {
 
 func (l *Logger) timePatternFromName(filename, prefix, ext string) (time.Time, error) {
 	if !strings.HasPrefix(filename, prefix) {
-		return time.Time{}, errors.New("mismatched prefix")
+		return time.Time{}, fmt.Errorf("mismatched prefix")
 	}
 	if !strings.HasSuffix(filename, ext) {
-		return time.Time{}, errors.New("mismatched extension")
+		return time.Time{}, fmt.Errorf("mismatched extension")
 	}
 	if l.timeParsePattern == "" {
 		index := strings.Index(l.oldTimeParsePattern, prefix)
 		start := index + len(prefix)
 		extStr := ext
-		if strings.Index(extStr, compressSuffix) != -1 {
+		if strings.Contains(extStr, compressSuffix) {
 			extStr = extStr[0 : len(extStr)-len(compressSuffix)]
 		}
 		end := len(l.oldTimeParsePattern) - len(extStr)

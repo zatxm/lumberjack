@@ -1,10 +1,8 @@
-// +build !linux
+//go:build !linux
 
 package lumberjack
 
-import (
-	"os"
-)
+import "os"
 
 func chown(_ string, _ os.FileInfo) error {
 	return nil

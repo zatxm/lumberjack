@@ -5,7 +5,6 @@ import (
 	"syscall"
 )
 
-// osChown is a var so we can mock it out during tests.
 var osChown = os.Chown
 
 func chown(name string, info os.FileInfo) error {

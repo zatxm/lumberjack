@@ -1,7 +1,5 @@
-module github.com/zatxm/lumberjack
+module github.com/zatxm/lumberjack/v2
 
-go 1.24.3
+go 1.26.3
 
-require (
-	github.com/lestrrat-go/strftime v1.1.0
-)
+require github.com/lestrrat-go/strftime v1.2.0

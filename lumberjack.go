@@ -116,6 +116,8 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 		if err = l.openExistingOrNew(len(p)); err != nil {
 			return 0, err
 		}
+	} else if err = l.syncFileState(len(p)); err != nil {
+		return 0, err
 	}
 
 	if l.PatternFileName != "" {
@@ -213,7 +215,7 @@ func (l *Logger) openNew(bakfilename string) error {
 	// we use truncate here because this should only get called when we've moved
 	// the file ourselves. if someone else creates the file in the meantime,
 	// just wipe out the contents.
-	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_TRUNC, mode)
 	if err != nil {
 		return fmt.Errorf("can't open new logfile: %s", err)
 	}
@@ -237,6 +239,41 @@ func backupName(name string, local bool) string {
 
 	timestamp := t.Format(backupTimeFormat)
 	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, timestamp, ext))
+}
+
+// syncFileState keeps the open file descriptor aligned with the active
+// filename when external tools truncate, remove, or replace the log file.
+func (l *Logger) syncFileState(writeLen int) error {
+	filename := l.filename()
+	info, err := osStat(filename)
+	if os.IsNotExist(err) {
+		if err := l.close(); err != nil {
+			return err
+		}
+		return l.openExistingOrNew(writeLen)
+	}
+	if err != nil {
+		return fmt.Errorf("error getting log file info: %s", err)
+	}
+
+	fileInfo, err := l.file.Stat()
+	if err != nil || !os.SameFile(info, fileInfo) {
+		if err := l.close(); err != nil {
+			return err
+		}
+		return l.openExistingOrNew(writeLen)
+	}
+
+	if info.Size() != l.size {
+		if _, err := l.file.Seek(0, io.SeekEnd); err != nil {
+			if closeErr := l.close(); closeErr != nil {
+				return closeErr
+			}
+			return l.openExistingOrNew(writeLen)
+		}
+		l.size = info.Size()
+	}
+	return nil
 }
 
 // openExistingOrNew opens the logfile if it exists and if the current write

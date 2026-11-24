@@ -4,6 +4,6 @@ package lumberjack
 
 import "os"
 
-func chown(_ string, _ os.FileInfo) error {
+func chown(_ *os.File, _ os.FileInfo) error {
 	return nil
 }
